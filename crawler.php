@@ -1,14 +1,35 @@
 <?php
 
-/**
- * Usage: crawler --depth=3 --dom=a[href],img[src] -n --follow="\.(jpg|png|)$" --print="$url\t$parent,\$response_code".
- */
+// TODO: write a helpful usage.
+$usage = function() use ($argv) {
+  print "Usage: " . basename($argv[0]) . " [OPTIONS] [URL]\n";
+  print "\n";
+  print "-d --depth=NUMBER        set maximum depth.\n";
+  print "-D --dom=LIST            set which dom elements and which attributes will be used to collect urls.\n";
+  print "-f --follow=REGEXP       \n";
+  print "-p --print=STRING        \n";
+  print "--sleep=SECONDS          \n";
+  print "--domains=LIST_CSV       \n";
+  print "--user-agent=STRING      \n";
+  print "--robots                 \n";
+  print "--help                   print this help.\n";
+  print "\n";
+};
+
+// No arguments.
 if ($argc == 1) {
-  print "Usage: " . basename($argv[0]) . " <URL>\n";
+  $usage();
+  exit;
+}
+
+// Ensure last argument is an url, not an option.
+if ($argv[$argc - 1][0] == '-') {
+  $usage();
   exit;
 }
 
 $options = getopt('d:D:f:np:s:', array(
+  'help',
   'depth:',
   'dom:',
   'follow:',
@@ -46,6 +67,10 @@ $dom =  array(
 
 foreach ($options as $key => $value) {
   switch ($key) {
+    case 'help':
+      $usage();
+      exit;
+
     case 'd':
     case 'depth':
       $maxdepth = $value;
@@ -153,11 +178,12 @@ while (!empty($urls)) {
     print "$print_value\n";
   }
 
+  // Sleep if we want to less stress the server.
   if ($sleep) {
     sleep($sleep);
   }
 
-  // Follow only specified domains.
+  // User could be interested in collecting urls only in specific domains.
   if (!in_array($url_parsed['host'], $domains)) {
     continue;
   }
@@ -176,14 +202,17 @@ while (!empty($urls)) {
     }
   }
 
-  // Collect urls to resources.
+  // TODO: look for base tag too.
+  $base_url = $url_parsed['scheme'] . '://' . $url_parsed['host'] . (isset($url_parsed['path']) ? $url_parsed['path'] : '');
+
+  // Collect urls, by extracting interesting dom elements.
   foreach ($dom as $tag => $attrs) {
     preg_match_all('/<' . $tag . '[^>]+(' . join('|', $attrs) . ')="(.+?)".*?>/i', $body, $matches);
 
     foreach ($matches[2] as $index => $deep) {
       // If simulating a real crawler, skip links with "nofollow".
       if ($check_robots) {
-        $nofollow = $tag == 'a' && preg_match('/rel="nofollow"/i', $matches[0][$index]);
+        $nofollow = ($tag == 'a' && preg_match('/rel="nofollow"/i', $matches[0][$index]));
 
         if ($nofollow) {
           continue;
@@ -193,19 +222,37 @@ while (!empty($urls)) {
       $deep = rtrim($deep, '/');
       $deep_parsed = parse_url($deep);
 
-      // E.g skip only fragment urls.
-      if (!isset($deep_parsed['path']) || !$deep_parsed['path']) {
+      // E.g fragment only urls.
+      if (!isset($deep_parsed['scheme']) &&
+          !isset($deep_parsed['host']) &&
+          (!isset($deep_parsed['path']) || !$deep_parsed['path']) &&
+          !isset($deep_parsed['query'])) {
         continue;
       }
 
-      // Relative urls.
-      if (!isset($deep_parsed['host']) && !isset($deep_parsed['scheme'])) {
-        $deep = $url_parsed['scheme'] . '://' . $url_parsed['host'] . '/' . ltrim($deep, '/');
-        $deep_parsed['scheme'] = $url_parsed['scheme'];
-        $deep_parsed['host'] = $url_parsed['host'];
+      // Relative urls must be become absolute.
+      if (!isset($deep_parsed['scheme']) && !isset($deep_parsed['host'])) {
+        if ($deep_parsed['path'][0] == '/') {
+          // Just prepend host name.
+          $deep = $url_parsed['scheme'] . '://' . $url_parsed['host'] . '/' . ltrim($deep, '/');
+        }
+        else {
+          // Expand ../
+          $tmp = $deep;
+          $base = $base_url;
+          while (substr($tmp, 0, 3) == '../') {
+            $tmp = substr($tmp, 3);
+            $base = dirname($base);
+          }
+
+          $deep = $base . '/' . ltrim($tmp, '/');
+        }
+
+        // Url has been modified, re-parse it.
+        $deep_parsed = parse_url($deep);
       }
 
-      // Skip "unfollowable" protocols (e.g javascript, mailto).
+      // Skip "unfollowable" protocols (e.g javascript, mailto, tel, skype).
       $followable_protocols = array('http', 'https', 'ftp');
       if (!in_array($deep_parsed['scheme'], $followable_protocols)) {
         continue;
